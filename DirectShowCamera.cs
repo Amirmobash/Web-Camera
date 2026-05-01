@@ -1,9 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 
-namespace UsbCameraOrangeDeutsch
+namespace UsbCameraPreview
 {
     public sealed class DirectShowCamera : IDisposable
     {
@@ -19,9 +20,9 @@ namespace UsbCameraOrangeDeutsch
         {
             internal CameraDevice(string name, string path, IMoniker moniker)
             {
-                Name = name;
-                DevicePath = path;
-                Moniker = moniker;
+                Name = string.IsNullOrWhiteSpace(name) ? "Unknown Camera" : name;
+                DevicePath = path ?? string.Empty;
+                Moniker = moniker ?? throw new ArgumentNullException(nameof(moniker));
             }
 
             public string Name { get; }
@@ -30,7 +31,9 @@ namespace UsbCameraOrangeDeutsch
 
             public override string ToString()
             {
-                return string.IsNullOrWhiteSpace(DevicePath) ? Name : Name + " [" + DevicePath + "]";
+                return string.IsNullOrWhiteSpace(DevicePath)
+                    ? Name
+                    : $"{Name} [{DevicePath}]";
             }
         }
 
@@ -41,26 +44,30 @@ namespace UsbCameraOrangeDeutsch
 
         public static List<CameraDevice> EnumerateVideoDevices()
         {
-            var result = new List<CameraDevice>();
+            var devices = new List<CameraDevice>();
             ICreateDevEnum devEnum = null;
             IEnumMoniker enumMoniker = null;
 
             try
             {
                 devEnum = (ICreateDevEnum)new CreateDevEnum();
+
                 var category = DirectShowGuids.CLSID_VideoInputDeviceCategory;
                 var hr = devEnum.CreateClassEnumerator(ref category, out enumMoniker, 0);
 
                 if (hr != 0 || enumMoniker == null)
-                    return result;
+                    return devices;
 
                 var monikers = new IMoniker[1];
+
                 while (enumMoniker.Next(1, monikers, IntPtr.Zero) == 0)
                 {
                     var moniker = monikers[0];
-                    var name = ReadMonikerProperty(moniker, "FriendlyName") ?? "Unbekannte Kamera";
-                    var path = ReadMonikerProperty(moniker, "DevicePath") ?? string.Empty;
-                    result.Add(new CameraDevice(name, path, moniker));
+
+                    var name = ReadMonikerProperty(moniker, "FriendlyName") ?? "Unknown Camera";
+                    var path = ReadMonikerProperty(moniker, "DevicePath") ?? GetMonikerDisplayName(moniker) ?? string.Empty;
+
+                    devices.Add(new CameraDevice(name, path, moniker));
                     monikers[0] = null;
                 }
             }
@@ -70,64 +77,83 @@ namespace UsbCameraOrangeDeutsch
                 ReleaseComObject(devEnum);
             }
 
-            return result;
+            return devices;
         }
 
-        public void StartPreview(IntPtr previewWindowHandle, System.Drawing.Rectangle previewBounds)
+        public void StartPreview(IntPtr previewWindowHandle, Rectangle previewBounds)
         {
             ThrowIfDisposed();
 
-            _graph = (IGraphBuilder)new FilterGraph();
-            _captureGraph = (ICaptureGraphBuilder2)new CaptureGraphBuilder2();
+            if (previewWindowHandle == IntPtr.Zero)
+                throw new ArgumentException("Preview window handle cannot be empty.", nameof(previewWindowHandle));
 
-            CheckHr(_captureGraph.SetFiltergraph(_graph), "CaptureGraphBuilder konnte nicht initialisiert werden.");
+            StopPreview();
 
-            object sourceObject;
-            var baseFilterGuid = typeof(IBaseFilter).GUID;
-            _device.Moniker.BindToObject(null, null, ref baseFilterGuid, out sourceObject);
-            _sourceFilter = (IBaseFilter)sourceObject;
-
-            CheckHr(_graph.AddFilter(_sourceFilter, "Ausgewählte USB-Kamera"), "Kamera konnte nicht zum DirectShow-Graph hinzugefügt werden.");
-
-            var pinCategory = DirectShowGuids.PIN_CATEGORY_PREVIEW;
-            var mediaType = DirectShowGuids.MEDIATYPE_Video;
-
-            var renderHr = _captureGraph.RenderStream(ref pinCategory, ref mediaType, _sourceFilter, null, null);
-            if (renderHr < 0)
+            try
             {
-                pinCategory = DirectShowGuids.PIN_CATEGORY_CAPTURE;
-                renderHr = _captureGraph.RenderStream(ref pinCategory, ref mediaType, _sourceFilter, null, null);
+                _graph = (IGraphBuilder)new FilterGraph();
+                _captureGraph = (ICaptureGraphBuilder2)new CaptureGraphBuilder2();
+
+                CheckHr(_captureGraph.SetFiltergraph(_graph), "Could not initialize the capture graph builder.");
+
+                object sourceObject;
+                var baseFilterGuid = typeof(IBaseFilter).GUID;
+
+                _device.Moniker.BindToObject(null, null, ref baseFilterGuid, out sourceObject);
+                _sourceFilter = (IBaseFilter)sourceObject;
+
+                CheckHr(_graph.AddFilter(_sourceFilter, "Selected USB Camera"), "Could not add the camera to the DirectShow graph.");
+
+                var pinCategory = DirectShowGuids.PIN_CATEGORY_PREVIEW;
+                var mediaType = DirectShowGuids.MEDIATYPE_Video;
+
+                var hr = _captureGraph.RenderStream(ref pinCategory, ref mediaType, _sourceFilter, null, null);
+
+                if (hr < 0)
+                {
+                    pinCategory = DirectShowGuids.PIN_CATEGORY_CAPTURE;
+                    hr = _captureGraph.RenderStream(ref pinCategory, ref mediaType, _sourceFilter, null, null);
+                }
+
+                CheckHr(hr, "Could not connect the video stream.");
+
+                _mediaControl = (IMediaControl)_graph;
+                _videoWindow = (IVideoWindow)_graph;
+
+                const int wsChild = 0x40000000;
+                const int wsClipSiblings = 0x04000000;
+                const int wsClipChildren = 0x02000000;
+                const int oaTrue = -1;
+
+                CheckHr(_videoWindow.put_Owner(previewWindowHandle), "Could not set the preview window owner.");
+                CheckHr(_videoWindow.put_MessageDrain(previewWindowHandle), "Could not set the preview message drain.");
+                CheckHr(_videoWindow.put_WindowStyle(wsChild | wsClipSiblings | wsClipChildren), "Could not set the preview window style.");
+                CheckHr(_videoWindow.put_Visible(oaTrue), "Could not show the preview window.");
+
+                ResizeVideo(previewBounds);
+
+                CheckHr(_mediaControl.Run(), "Could not start the camera.");
             }
-            CheckHr(renderHr, "Videostream konnte nicht verbunden werden.");
-
-            _mediaControl = (IMediaControl)_graph;
-            _videoWindow = (IVideoWindow)_graph;
-
-            const int WS_CHILD = 0x40000000;
-            const int WS_CLIPSIBLINGS = 0x04000000;
-            const int OATRUE = -1;
-
-            CheckHr(_videoWindow.put_Owner(previewWindowHandle), "Vorschaufenster konnte nicht gesetzt werden.");
-            CheckHr(_videoWindow.put_WindowStyle(WS_CHILD | WS_CLIPSIBLINGS), "Fensterstil konnte nicht gesetzt werden.");
-            CheckHr(_videoWindow.put_Visible(OATRUE), "Vorschau konnte nicht sichtbar gemacht werden.");
-            ResizeVideo(previewBounds);
-
-            CheckHr(_mediaControl.Run(), "Kamera konnte nicht gestartet werden.");
+            catch
+            {
+                StopPreview();
+                throw;
+            }
         }
 
-        public void ResizeVideo(System.Drawing.Rectangle previewBounds)
+        public void ResizeVideo(Rectangle previewBounds)
         {
             if (_videoWindow == null)
                 return;
 
-            _videoWindow.SetWindowPosition(0, 0, Math.Max(1, previewBounds.Width), Math.Max(1, previewBounds.Height));
+            var width = Math.Max(1, previewBounds.Width);
+            var height = Math.Max(1, previewBounds.Height);
+
+            CheckHr(_videoWindow.SetWindowPosition(0, 0, width, height), "Could not resize the preview window.");
         }
 
-        public void Dispose()
+        public void StopPreview()
         {
-            if (_disposed)
-                return;
-
             try
             {
                 if (_mediaControl != null)
@@ -135,21 +161,21 @@ namespace UsbCameraOrangeDeutsch
             }
             catch
             {
-                // Ignore cleanup errors.
             }
 
             try
             {
                 if (_videoWindow != null)
                 {
-                    const int OAFALSE = 0;
-                    _videoWindow.put_Visible(OAFALSE);
+                    const int oaFalse = 0;
+
+                    _videoWindow.put_Visible(oaFalse);
+                    _videoWindow.put_MessageDrain(IntPtr.Zero);
                     _videoWindow.put_Owner(IntPtr.Zero);
                 }
             }
             catch
             {
-                // Ignore cleanup errors.
             }
 
             ReleaseComObject(_sourceFilter);
@@ -161,7 +187,16 @@ namespace UsbCameraOrangeDeutsch
             _graph = null;
             _mediaControl = null;
             _videoWindow = null;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            StopPreview();
             _disposed = true;
+            GC.SuppressFinalize(this);
         }
 
         private void ThrowIfDisposed()
@@ -173,49 +208,74 @@ namespace UsbCameraOrangeDeutsch
         private static string ReadMonikerProperty(IMoniker moniker, string propertyName)
         {
             object bagObject = null;
+
             try
             {
                 var bagGuid = typeof(IPropertyBag).GUID;
-                moniker.BindToStorage(null, null, ref bagGuid, out bagObject);
-                var bag = (IPropertyBag)bagObject;
 
-                object value;
-                var hr = bag.Read(propertyName, out value, IntPtr.Zero);
-                if (hr == 0 && value != null)
-                    return value.ToString();
+                moniker.BindToStorage(null, null, ref bagGuid, out bagObject);
+
+                var bag = (IPropertyBag)bagObject;
+                var hr = bag.Read(propertyName, out var value, IntPtr.Zero);
+
+                return hr == 0 && value != null ? value.ToString() : null;
             }
             catch
             {
-                // Some drivers do not expose all properties.
+                return null;
             }
             finally
             {
                 ReleaseComObject(bagObject);
             }
+        }
 
-            return null;
+        private static string GetMonikerDisplayName(IMoniker moniker)
+        {
+            IBindCtx bindContext = null;
+
+            try
+            {
+                var hr = CreateBindCtx(0, out bindContext);
+
+                if (hr < 0 || bindContext == null)
+                    return null;
+
+                moniker.GetDisplayName(bindContext, null, out var displayName);
+                return displayName;
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                ReleaseComObject(bindContext);
+            }
         }
 
         private static void CheckHr(int hr, string message)
         {
             if (hr < 0)
-                throw new InvalidOperationException(message + " HRESULT: 0x" + hr.ToString("X8"));
+                throw new InvalidOperationException($"{message} HRESULT: 0x{unchecked((uint)hr):X8}");
         }
 
         private static void ReleaseComObject(object comObject)
         {
-            if (comObject != null && Marshal.IsComObject(comObject))
+            if (comObject == null || !Marshal.IsComObject(comObject))
+                return;
+
+            try
             {
-                try
-                {
-                    Marshal.ReleaseComObject(comObject);
-                }
-                catch
-                {
-                    // Ignore cleanup errors.
-                }
+                Marshal.ReleaseComObject(comObject);
+            }
+            catch
+            {
             }
         }
+
+        [DllImport("ole32.dll")]
+        private static extern int CreateBindCtx(int reserved, out IBindCtx bindContext);
 
         private static class DirectShowGuids
         {
@@ -249,7 +309,7 @@ namespace UsbCameraOrangeDeutsch
         private interface ICreateDevEnum
         {
             [PreserveSig]
-            int CreateClassEnumerator(ref Guid pType, out IEnumMoniker ppEnumMoniker, int dwFlags);
+            int CreateClassEnumerator(ref Guid category, out IEnumMoniker enumMoniker, int flags);
         }
 
         [ComImport]
@@ -259,14 +319,14 @@ namespace UsbCameraOrangeDeutsch
         {
             [PreserveSig]
             int Read(
-                [MarshalAs(UnmanagedType.LPWStr)] string pszPropName,
-                [MarshalAs(UnmanagedType.Struct)] out object pVar,
-                IntPtr pErrorLog);
+                [MarshalAs(UnmanagedType.LPWStr)] string propertyName,
+                [MarshalAs(UnmanagedType.Struct)] out object value,
+                IntPtr errorLog);
 
             [PreserveSig]
             int Write(
-                [MarshalAs(UnmanagedType.LPWStr)] string pszPropName,
-                [MarshalAs(UnmanagedType.Struct)] ref object pVar);
+                [MarshalAs(UnmanagedType.LPWStr)] string propertyName,
+                [MarshalAs(UnmanagedType.Struct)] ref object value);
         }
 
         [ComImport]
@@ -282,25 +342,25 @@ namespace UsbCameraOrangeDeutsch
         private interface IFilterGraph
         {
             [PreserveSig]
-            int AddFilter(IBaseFilter pFilter, [MarshalAs(UnmanagedType.LPWStr)] string pName);
+            int AddFilter(IBaseFilter filter, [MarshalAs(UnmanagedType.LPWStr)] string name);
 
             [PreserveSig]
-            int RemoveFilter(IBaseFilter pFilter);
+            int RemoveFilter(IBaseFilter filter);
 
             [PreserveSig]
-            int EnumFilters(out object ppEnum);
+            int EnumFilters(out object enumFilters);
 
             [PreserveSig]
-            int FindFilterByName([MarshalAs(UnmanagedType.LPWStr)] string pName, out IBaseFilter ppFilter);
+            int FindFilterByName([MarshalAs(UnmanagedType.LPWStr)] string name, out IBaseFilter filter);
 
             [PreserveSig]
-            int ConnectDirect(object ppinOut, object ppinIn, IntPtr pmt);
+            int ConnectDirect(object outputPin, object inputPin, IntPtr mediaType);
 
             [PreserveSig]
-            int Reconnect(object ppin);
+            int Reconnect(object pin);
 
             [PreserveSig]
-            int Disconnect(object ppin);
+            int Disconnect(object pin);
 
             [PreserveSig]
             int SetDefaultSyncSource();
@@ -312,43 +372,48 @@ namespace UsbCameraOrangeDeutsch
         private interface IGraphBuilder : IFilterGraph
         {
             [PreserveSig]
-            new int AddFilter(IBaseFilter pFilter, [MarshalAs(UnmanagedType.LPWStr)] string pName);
+            new int AddFilter(IBaseFilter filter, [MarshalAs(UnmanagedType.LPWStr)] string name);
 
             [PreserveSig]
-            new int RemoveFilter(IBaseFilter pFilter);
+            new int RemoveFilter(IBaseFilter filter);
 
             [PreserveSig]
-            new int EnumFilters(out object ppEnum);
+            new int EnumFilters(out object enumFilters);
 
             [PreserveSig]
-            new int FindFilterByName([MarshalAs(UnmanagedType.LPWStr)] string pName, out IBaseFilter ppFilter);
+            new int FindFilterByName([MarshalAs(UnmanagedType.LPWStr)] string name, out IBaseFilter filter);
 
             [PreserveSig]
-            new int ConnectDirect(object ppinOut, object ppinIn, IntPtr pmt);
+            new int ConnectDirect(object outputPin, object inputPin, IntPtr mediaType);
 
             [PreserveSig]
-            new int Reconnect(object ppin);
+            new int Reconnect(object pin);
 
             [PreserveSig]
-            new int Disconnect(object ppin);
+            new int Disconnect(object pin);
 
             [PreserveSig]
             new int SetDefaultSyncSource();
 
             [PreserveSig]
-            int Connect(object ppinOut, object ppinIn);
+            int Connect(object outputPin, object inputPin);
 
             [PreserveSig]
-            int Render(object ppinOut);
+            int Render(object outputPin);
 
             [PreserveSig]
-            int RenderFile([MarshalAs(UnmanagedType.LPWStr)] string lpcwstrFile, [MarshalAs(UnmanagedType.LPWStr)] string lpcwstrPlayList);
+            int RenderFile(
+                [MarshalAs(UnmanagedType.LPWStr)] string fileName,
+                [MarshalAs(UnmanagedType.LPWStr)] string playList);
 
             [PreserveSig]
-            int AddSourceFilter([MarshalAs(UnmanagedType.LPWStr)] string lpcwstrFileName, [MarshalAs(UnmanagedType.LPWStr)] string lpcwstrFilterName, out IBaseFilter ppFilter);
+            int AddSourceFilter(
+                [MarshalAs(UnmanagedType.LPWStr)] string fileName,
+                [MarshalAs(UnmanagedType.LPWStr)] string filterName,
+                out IBaseFilter filter);
 
             [PreserveSig]
-            int SetLogFile(IntPtr hFile);
+            int SetLogFile(IntPtr fileHandle);
 
             [PreserveSig]
             int Abort();
@@ -363,19 +428,33 @@ namespace UsbCameraOrangeDeutsch
         private interface ICaptureGraphBuilder2
         {
             [PreserveSig]
-            int SetFiltergraph(IGraphBuilder pfg);
+            int SetFiltergraph(IGraphBuilder graph);
 
             [PreserveSig]
-            int GetFiltergraph(out IGraphBuilder ppfg);
+            int GetFiltergraph(out IGraphBuilder graph);
 
             [PreserveSig]
-            int SetOutputFileName(ref Guid pType, [MarshalAs(UnmanagedType.LPWStr)] string lpstrFile, out IBaseFilter ppbf, out object ppSink);
+            int SetOutputFileName(
+                ref Guid type,
+                [MarshalAs(UnmanagedType.LPWStr)] string fileName,
+                out IBaseFilter filter,
+                out object sink);
 
             [PreserveSig]
-            int FindInterface(ref Guid pCategory, ref Guid pType, IBaseFilter pf, ref Guid riid, [MarshalAs(UnmanagedType.IUnknown)] out object ppint);
+            int FindInterface(
+                ref Guid category,
+                ref Guid type,
+                IBaseFilter filter,
+                ref Guid interfaceId,
+                [MarshalAs(UnmanagedType.IUnknown)] out object result);
 
             [PreserveSig]
-            int RenderStream(ref Guid pCategory, ref Guid pType, [MarshalAs(UnmanagedType.Interface)] object pSource, IBaseFilter pfCompressor, IBaseFilter pfRenderer);
+            int RenderStream(
+                ref Guid category,
+                ref Guid type,
+                [MarshalAs(UnmanagedType.Interface)] object source,
+                IBaseFilter compressor,
+                IBaseFilter renderer);
         }
 
         [ComImport]
@@ -393,19 +472,19 @@ namespace UsbCameraOrangeDeutsch
             int Stop();
 
             [PreserveSig]
-            int GetState(int msTimeout, out int pfs);
+            int GetState(int timeout, out int state);
 
             [PreserveSig]
-            int RenderFile([MarshalAs(UnmanagedType.BStr)] string strFilename);
+            int RenderFile([MarshalAs(UnmanagedType.BStr)] string fileName);
 
             [PreserveSig]
-            int AddSourceFilter([MarshalAs(UnmanagedType.BStr)] string strFilename, [MarshalAs(UnmanagedType.IDispatch)] out object ppUnk);
+            int AddSourceFilter([MarshalAs(UnmanagedType.BStr)] string fileName, [MarshalAs(UnmanagedType.IDispatch)] out object filter);
 
             [PreserveSig]
-            int get_FilterCollection([MarshalAs(UnmanagedType.IDispatch)] out object ppUnk);
+            int get_FilterCollection([MarshalAs(UnmanagedType.IDispatch)] out object collection);
 
             [PreserveSig]
-            int get_RegFilterCollection([MarshalAs(UnmanagedType.IDispatch)] out object ppUnk);
+            int get_RegFilterCollection([MarshalAs(UnmanagedType.IDispatch)] out object collection);
 
             [PreserveSig]
             int StopWhenReady();
@@ -417,10 +496,10 @@ namespace UsbCameraOrangeDeutsch
         private interface IVideoWindow
         {
             [PreserveSig]
-            int put_Caption([MarshalAs(UnmanagedType.BStr)] string strCaption);
+            int put_Caption([MarshalAs(UnmanagedType.BStr)] string caption);
 
             [PreserveSig]
-            int get_Caption([MarshalAs(UnmanagedType.BStr)] out string strCaption);
+            int get_Caption([MarshalAs(UnmanagedType.BStr)] out string caption);
 
             [PreserveSig]
             int put_WindowStyle(int windowStyle);
@@ -510,7 +589,7 @@ namespace UsbCameraOrangeDeutsch
             int SetWindowForeground(int focus);
 
             [PreserveSig]
-            int NotifyOwnerMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+            int NotifyOwnerMessage(IntPtr windowHandle, int message, IntPtr wParam, IntPtr lParam);
 
             [PreserveSig]
             int SetWindowPosition(int left, int top, int width, int height);
