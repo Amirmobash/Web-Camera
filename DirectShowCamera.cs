@@ -4,16 +4,18 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 
-namespace UsbCameraPreview
+namespace UsbCameraOrangeDeutsch
 {
     public sealed class DirectShowCamera : IDisposable
     {
         private readonly CameraDevice _device;
+
         private IGraphBuilder _graph;
-        private ICaptureGraphBuilder2 _captureGraph;
-        private IBaseFilter _sourceFilter;
+        private ICaptureGraphBuilder2 _builder;
+        private IBaseFilter _cameraFilter;
         private IMediaControl _mediaControl;
         private IVideoWindow _videoWindow;
+
         private bool _disposed;
 
         public sealed class CameraDevice
@@ -22,7 +24,7 @@ namespace UsbCameraPreview
             {
                 Name = string.IsNullOrWhiteSpace(name) ? "Unknown Camera" : name;
                 DevicePath = path ?? string.Empty;
-                Moniker = moniker ?? throw new ArgumentNullException(nameof(moniker));
+                Moniker = moniker;
             }
 
             public string Name { get; }
@@ -31,9 +33,10 @@ namespace UsbCameraPreview
 
             public override string ToString()
             {
-                return string.IsNullOrWhiteSpace(DevicePath)
-                    ? Name
-                    : $"{Name} [{DevicePath}]";
+                if (string.IsNullOrWhiteSpace(DevicePath))
+                    return Name;
+
+                return $"{Name} [{DevicePath}]";
             }
         }
 
@@ -44,7 +47,8 @@ namespace UsbCameraPreview
 
         public static List<CameraDevice> EnumerateVideoDevices()
         {
-            var devices = new List<CameraDevice>();
+            var cameras = new List<CameraDevice>();
+
             ICreateDevEnum devEnum = null;
             IEnumMoniker enumMoniker = null;
 
@@ -52,11 +56,11 @@ namespace UsbCameraPreview
             {
                 devEnum = (ICreateDevEnum)new CreateDevEnum();
 
-                var category = DirectShowGuids.CLSID_VideoInputDeviceCategory;
+                var category = DirectShowGuids.VideoInputDeviceCategory;
                 var hr = devEnum.CreateClassEnumerator(ref category, out enumMoniker, 0);
 
                 if (hr != 0 || enumMoniker == null)
-                    return devices;
+                    return cameras;
 
                 var monikers = new IMoniker[1];
 
@@ -64,58 +68,59 @@ namespace UsbCameraPreview
                 {
                     var moniker = monikers[0];
 
-                    var name = ReadMonikerProperty(moniker, "FriendlyName") ?? "Unknown Camera";
-                    var path = ReadMonikerProperty(moniker, "DevicePath") ?? GetMonikerDisplayName(moniker) ?? string.Empty;
+                    var name = ReadProperty(moniker, "FriendlyName") ?? "Unknown Camera";
+                    var path = ReadProperty(moniker, "DevicePath") ?? string.Empty;
 
-                    devices.Add(new CameraDevice(name, path, moniker));
+                    cameras.Add(new CameraDevice(name, path, moniker));
+
                     monikers[0] = null;
                 }
             }
             finally
             {
-                ReleaseComObject(enumMoniker);
-                ReleaseComObject(devEnum);
+                Release(enumMoniker);
+                Release(devEnum);
             }
 
-            return devices;
+            return cameras;
         }
 
-        public void StartPreview(IntPtr previewWindowHandle, Rectangle previewBounds)
+        public void StartPreview(IntPtr parentHandle, Rectangle bounds)
         {
             ThrowIfDisposed();
 
-            if (previewWindowHandle == IntPtr.Zero)
-                throw new ArgumentException("Preview window handle cannot be empty.", nameof(previewWindowHandle));
+            if (parentHandle == IntPtr.Zero)
+                throw new ArgumentException("Invalid preview window handle.", nameof(parentHandle));
 
             StopPreview();
 
             try
             {
                 _graph = (IGraphBuilder)new FilterGraph();
-                _captureGraph = (ICaptureGraphBuilder2)new CaptureGraphBuilder2();
+                _builder = (ICaptureGraphBuilder2)new CaptureGraphBuilder2();
 
-                CheckHr(_captureGraph.SetFiltergraph(_graph), "Could not initialize the capture graph builder.");
+                Check(_builder.SetFiltergraph(_graph), "Could not create camera graph.");
 
-                object sourceObject;
-                var baseFilterGuid = typeof(IBaseFilter).GUID;
+                object filterObject;
+                var filterId = typeof(IBaseFilter).GUID;
 
-                _device.Moniker.BindToObject(null, null, ref baseFilterGuid, out sourceObject);
-                _sourceFilter = (IBaseFilter)sourceObject;
+                _device.Moniker.BindToObject(null, null, ref filterId, out filterObject);
+                _cameraFilter = (IBaseFilter)filterObject;
 
-                CheckHr(_graph.AddFilter(_sourceFilter, "Selected USB Camera"), "Could not add the camera to the DirectShow graph.");
+                Check(_graph.AddFilter(_cameraFilter, "USB Camera"), "Could not add camera filter.");
 
-                var pinCategory = DirectShowGuids.PIN_CATEGORY_PREVIEW;
-                var mediaType = DirectShowGuids.MEDIATYPE_Video;
+                var pinCategory = DirectShowGuids.PreviewPin;
+                var mediaType = DirectShowGuids.VideoMediaType;
 
-                var hr = _captureGraph.RenderStream(ref pinCategory, ref mediaType, _sourceFilter, null, null);
+                var hr = _builder.RenderStream(ref pinCategory, ref mediaType, _cameraFilter, null, null);
 
                 if (hr < 0)
                 {
-                    pinCategory = DirectShowGuids.PIN_CATEGORY_CAPTURE;
-                    hr = _captureGraph.RenderStream(ref pinCategory, ref mediaType, _sourceFilter, null, null);
+                    pinCategory = DirectShowGuids.CapturePin;
+                    hr = _builder.RenderStream(ref pinCategory, ref mediaType, _cameraFilter, null, null);
                 }
 
-                CheckHr(hr, "Could not connect the video stream.");
+                Check(hr, "Could not render camera stream.");
 
                 _mediaControl = (IMediaControl)_graph;
                 _videoWindow = (IVideoWindow)_graph;
@@ -123,16 +128,16 @@ namespace UsbCameraPreview
                 const int wsChild = 0x40000000;
                 const int wsClipSiblings = 0x04000000;
                 const int wsClipChildren = 0x02000000;
-                const int oaTrue = -1;
+                const int visible = -1;
 
-                CheckHr(_videoWindow.put_Owner(previewWindowHandle), "Could not set the preview window owner.");
-                CheckHr(_videoWindow.put_MessageDrain(previewWindowHandle), "Could not set the preview message drain.");
-                CheckHr(_videoWindow.put_WindowStyle(wsChild | wsClipSiblings | wsClipChildren), "Could not set the preview window style.");
-                CheckHr(_videoWindow.put_Visible(oaTrue), "Could not show the preview window.");
+                Check(_videoWindow.put_Owner(parentHandle), "Could not set preview owner.");
+                Check(_videoWindow.put_MessageDrain(parentHandle), "Could not set message drain.");
+                Check(_videoWindow.put_WindowStyle(wsChild | wsClipSiblings | wsClipChildren), "Could not set preview style.");
+                Check(_videoWindow.put_Visible(visible), "Could not show preview.");
 
-                ResizeVideo(previewBounds);
+                ResizeVideo(bounds);
 
-                CheckHr(_mediaControl.Run(), "Could not start the camera.");
+                Check(_mediaControl.Run(), "Could not start camera.");
             }
             catch
             {
@@ -141,23 +146,22 @@ namespace UsbCameraPreview
             }
         }
 
-        public void ResizeVideo(Rectangle previewBounds)
+        public void ResizeVideo(Rectangle bounds)
         {
             if (_videoWindow == null)
                 return;
 
-            var width = Math.Max(1, previewBounds.Width);
-            var height = Math.Max(1, previewBounds.Height);
+            var width = Math.Max(1, bounds.Width);
+            var height = Math.Max(1, bounds.Height);
 
-            CheckHr(_videoWindow.SetWindowPosition(0, 0, width, height), "Could not resize the preview window.");
+            _videoWindow.SetWindowPosition(0, 0, width, height);
         }
 
         public void StopPreview()
         {
             try
             {
-                if (_mediaControl != null)
-                    _mediaControl.Stop();
+                _mediaControl?.Stop();
             }
             catch
             {
@@ -167,9 +171,7 @@ namespace UsbCameraPreview
             {
                 if (_videoWindow != null)
                 {
-                    const int oaFalse = 0;
-
-                    _videoWindow.put_Visible(oaFalse);
+                    _videoWindow.put_Visible(0);
                     _videoWindow.put_MessageDrain(IntPtr.Zero);
                     _videoWindow.put_Owner(IntPtr.Zero);
                 }
@@ -178,12 +180,12 @@ namespace UsbCameraPreview
             {
             }
 
-            ReleaseComObject(_sourceFilter);
-            ReleaseComObject(_captureGraph);
-            ReleaseComObject(_graph);
+            Release(_cameraFilter);
+            Release(_builder);
+            Release(_graph);
 
-            _sourceFilter = null;
-            _captureGraph = null;
+            _cameraFilter = null;
+            _builder = null;
             _graph = null;
             _mediaControl = null;
             _videoWindow = null;
@@ -195,6 +197,7 @@ namespace UsbCameraPreview
                 return;
 
             StopPreview();
+
             _disposed = true;
             GC.SuppressFinalize(this);
         }
@@ -205,64 +208,45 @@ namespace UsbCameraPreview
                 throw new ObjectDisposedException(nameof(DirectShowCamera));
         }
 
-        private static string ReadMonikerProperty(IMoniker moniker, string propertyName)
+        private static string ReadProperty(IMoniker moniker, string propertyName)
         {
             object bagObject = null;
 
             try
             {
-                var bagGuid = typeof(IPropertyBag).GUID;
+                var bagId = typeof(IPropertyBag).GUID;
 
-                moniker.BindToStorage(null, null, ref bagGuid, out bagObject);
+                moniker.BindToStorage(null, null, ref bagId, out bagObject);
 
                 var bag = (IPropertyBag)bagObject;
                 var hr = bag.Read(propertyName, out var value, IntPtr.Zero);
 
-                return hr == 0 && value != null ? value.ToString() : null;
+                if (hr == 0 && value != null)
+                    return value.ToString();
             }
             catch
             {
-                return null;
             }
             finally
             {
-                ReleaseComObject(bagObject);
+                Release(bagObject);
             }
+
+            return null;
         }
 
-        private static string GetMonikerDisplayName(IMoniker moniker)
-        {
-            IBindCtx bindContext = null;
-
-            try
-            {
-                var hr = CreateBindCtx(0, out bindContext);
-
-                if (hr < 0 || bindContext == null)
-                    return null;
-
-                moniker.GetDisplayName(bindContext, null, out var displayName);
-                return displayName;
-            }
-            catch
-            {
-                return null;
-            }
-            finally
-            {
-                ReleaseComObject(bindContext);
-            }
-        }
-
-        private static void CheckHr(int hr, string message)
+        private static void Check(int hr, string message)
         {
             if (hr < 0)
                 throw new InvalidOperationException($"{message} HRESULT: 0x{unchecked((uint)hr):X8}");
         }
 
-        private static void ReleaseComObject(object comObject)
+        private static void Release(object comObject)
         {
-            if (comObject == null || !Marshal.IsComObject(comObject))
+            if (comObject == null)
+                return;
+
+            if (!Marshal.IsComObject(comObject))
                 return;
 
             try
@@ -274,15 +258,12 @@ namespace UsbCameraPreview
             }
         }
 
-        [DllImport("ole32.dll")]
-        private static extern int CreateBindCtx(int reserved, out IBindCtx bindContext);
-
         private static class DirectShowGuids
         {
-            public static readonly Guid CLSID_VideoInputDeviceCategory = new Guid("860BB310-5D01-11D0-BD3B-00A0C911CE86");
-            public static readonly Guid MEDIATYPE_Video = new Guid("73646976-0000-0010-8000-00AA00389B71");
-            public static readonly Guid PIN_CATEGORY_PREVIEW = new Guid("FB6C4282-0353-11D1-905F-0000C0CC16BA");
-            public static readonly Guid PIN_CATEGORY_CAPTURE = new Guid("FB6C4281-0353-11D1-905F-0000C0CC16BA");
+            public static readonly Guid VideoInputDeviceCategory = new Guid("860BB310-5D01-11D0-BD3B-00A0C911CE86");
+            public static readonly Guid VideoMediaType = new Guid("73646976-0000-0010-8000-00AA00389B71");
+            public static readonly Guid PreviewPin = new Guid("FB6C4282-0353-11D1-905F-0000C0CC16BA");
+            public static readonly Guid CapturePin = new Guid("FB6C4281-0353-11D1-905F-0000C0CC16BA");
         }
 
         [ComImport]
@@ -478,7 +459,9 @@ namespace UsbCameraPreview
             int RenderFile([MarshalAs(UnmanagedType.BStr)] string fileName);
 
             [PreserveSig]
-            int AddSourceFilter([MarshalAs(UnmanagedType.BStr)] string fileName, [MarshalAs(UnmanagedType.IDispatch)] out object filter);
+            int AddSourceFilter(
+                [MarshalAs(UnmanagedType.BStr)] string fileName,
+                [MarshalAs(UnmanagedType.IDispatch)] out object filter);
 
             [PreserveSig]
             int get_FilterCollection([MarshalAs(UnmanagedType.IDispatch)] out object collection);
