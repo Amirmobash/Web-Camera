@@ -19,7 +19,7 @@ namespace UsbCameraOrangeDeutsch
         private readonly Label _hintLabel;
 
         private DirectShowCamera _camera;
-        private DirectShowCamera.CameraDevice _selectedDevice;
+        private DirectShowCamera.CameraDevice _currentCamera;
 
         private static readonly Color Orange = Color.FromArgb(255, 128, 0);
         private static readonly Color OrangeDark = Color.FromArgb(210, 90, 0);
@@ -29,7 +29,7 @@ namespace UsbCameraOrangeDeutsch
 
         public MainForm()
         {
-            Text = "USB-Kamera Vorschau";
+            Text = "USB Camera Preview";
             MinimumSize = new Size(860, 560);
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = Background;
@@ -45,7 +45,7 @@ namespace UsbCameraOrangeDeutsch
             _titleLabel = new Label
             {
                 AutoSize = false,
-                Text = "USB-Kamera Vorschau",
+                Text = "USB Camera Preview",
                 ForeColor = Color.White,
                 Font = new Font("Segoe UI", 20F, FontStyle.Bold, GraphicsUnit.Point),
                 Location = new Point(24, 14),
@@ -55,7 +55,7 @@ namespace UsbCameraOrangeDeutsch
             _statusLabel = new Label
             {
                 AutoSize = false,
-                Text = "Kamera wird gesucht...",
+                Text = "Looking for camera...",
                 ForeColor = Color.White,
                 Font = new Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point),
                 Location = new Point(27, 55),
@@ -73,22 +73,23 @@ namespace UsbCameraOrangeDeutsch
                 Padding = new Padding(18)
             };
 
-            _refreshButton = CreateOrangeButton("Aktualisieren");
+            _refreshButton = CreateButton("Refresh");
             _refreshButton.Location = new Point(18, 20);
             _refreshButton.Click += (s, e) => RestartCamera();
 
-            _startButton = CreateOrangeButton("Starten");
+            _startButton = CreateButton("Start");
             _startButton.Location = new Point(158, 20);
             _startButton.Click += (s, e) => StartCamera();
 
-            _stopButton = CreateOrangeButton("Stoppen");
+            _stopButton = CreateButton("Stop");
             _stopButton.Location = new Point(298, 20);
-            _stopButton.Click += (s, e) => StopCamera("Kamera gestoppt.");
+            _stopButton.Enabled = false;
+            _stopButton.Click += (s, e) => StopCamera("Camera stopped.");
 
             _hintLabel = new Label
             {
                 AutoSize = false,
-                Text = "Hinweis: Die Kamera-Auswahl ist absichtlich deaktiviert. Zielkamera in App.config einstellen.",
+                Text = "Camera selection is locked. Set the target camera in App.config.",
                 ForeColor = Color.Gainsboro,
                 Location = new Point(452, 25),
                 Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
@@ -103,10 +104,13 @@ namespace UsbCameraOrangeDeutsch
             _previewPanel = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.Black,
-                Margin = new Padding(18)
+                BackColor = Color.Black
             };
-            _previewPanel.Resize += (s, e) => _camera?.ResizeVideo(_previewPanel.ClientRectangle);
+
+            _previewPanel.Resize += (s, e) =>
+            {
+                _camera?.ResizeVideo(_previewPanel.ClientRectangle);
+            };
 
             var previewFrame = new Panel
             {
@@ -114,6 +118,7 @@ namespace UsbCameraOrangeDeutsch
                 Padding = new Padding(16),
                 BackColor = Background
             };
+
             previewFrame.Controls.Add(_previewPanel);
 
             Controls.Add(previewFrame);
@@ -124,7 +129,7 @@ namespace UsbCameraOrangeDeutsch
             FormClosing += (s, e) => CleanupCamera();
         }
 
-        private Button CreateOrangeButton(string text)
+        private Button CreateButton(string text)
         {
             var button = new Button
             {
@@ -137,15 +142,17 @@ namespace UsbCameraOrangeDeutsch
                 Font = new Font("Segoe UI", 9F, FontStyle.Bold, GraphicsUnit.Point),
                 Cursor = Cursors.Hand
             };
+
             button.FlatAppearance.BorderColor = OrangeLight;
             button.FlatAppearance.MouseOverBackColor = OrangeLight;
             button.FlatAppearance.MouseDownBackColor = OrangeDark;
+
             return button;
         }
 
         private void RestartCamera()
         {
-            StopCamera("Kamera wird neu geladen...");
+            StopCamera("Reloading camera...");
             StartCamera();
         }
 
@@ -154,80 +161,123 @@ namespace UsbCameraOrangeDeutsch
             try
             {
                 CleanupCamera();
-                _selectedDevice = SelectLockedCamera();
 
-                if (_selectedDevice == null)
+                _currentCamera = FindCamera();
+
+                if (_currentCamera == null)
+                {
+                    _startButton.Enabled = true;
+                    _stopButton.Enabled = false;
                     return;
+                }
 
-                _camera = new DirectShowCamera(_selectedDevice);
+                _camera = new DirectShowCamera(_currentCamera);
                 _camera.StartPreview(_previewPanel.Handle, _previewPanel.ClientRectangle);
-                SetStatus("Aktiv: " + _selectedDevice.Name);
+
+                SetStatus("Active: " + _currentCamera.Name);
+
                 _startButton.Enabled = false;
                 _stopButton.Enabled = true;
             }
             catch (Exception ex)
             {
                 CleanupCamera();
-                SetStatus("Fehler: " + ex.Message);
-                MessageBox.Show(this, ex.Message, "Kamera-Fehler", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+                _startButton.Enabled = true;
+                _stopButton.Enabled = false;
+
+                SetStatus("Error: " + ex.Message);
+
+                MessageBox.Show(
+                    this,
+                    ex.Message,
+                    "Camera Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
             }
         }
 
-        private DirectShowCamera.CameraDevice SelectLockedCamera()
+        private DirectShowCamera.CameraDevice FindCamera()
         {
-            var devices = DirectShowCamera.EnumerateVideoDevices();
-            var targetName = (ConfigurationManager.AppSettings["TargetCameraName"] ?? string.Empty).Trim();
-            var matchMode = (ConfigurationManager.AppSettings["CameraMatchMode"] ?? "Contains").Trim();
+            var cameras = DirectShowCamera.EnumerateVideoDevices();
 
-            if (devices.Count == 0)
+            if (cameras.Count == 0)
             {
-                SetStatus("Keine USB/Web-Kamera gefunden.");
-                MessageBox.Show(this, "Keine USB/Web-Kamera gefunden.", "Kamera", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                SetStatus("No USB or webcam device found.");
+
+                MessageBox.Show(
+                    this,
+                    "No USB or webcam device was found.",
+                    "Camera",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+
                 return null;
             }
 
-            if (!string.IsNullOrWhiteSpace(targetName))
-            {
-                var comparison = StringComparison.OrdinalIgnoreCase;
-                var selected = matchMode.Equals("Exact", comparison)
-                    ? devices.FirstOrDefault(d => string.Equals(d.Name, targetName, comparison))
-                    : devices.FirstOrDefault(d => d.Name.IndexOf(targetName, comparison) >= 0);
+            var targetName = GetSetting("TargetCameraName");
+            var matchMode = GetSetting("CameraMatchMode", "Contains");
 
-                if (selected == null)
-                {
-                    var names = string.Join(Environment.NewLine, devices.Select(d => "- " + d.Name));
-                    SetStatus("Zielkamera nicht gefunden: " + targetName);
-                    MessageBox.Show(
-                        this,
-                        "Die Zielkamera wurde nicht gefunden:\n" + targetName + "\n\nGefundene Kameras:\n" + names,
-                        "Zielkamera nicht gefunden",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
-                    return null;
-                }
+            if (string.IsNullOrWhiteSpace(targetName))
+                return cameras[0];
 
-                return selected;
-            }
+            var comparison = StringComparison.OrdinalIgnoreCase;
 
-            // Kein Auswahlfeld im UI: Wenn kein Zielname gesetzt ist, wird nur die erste Kamera verwendet.
-            return devices[0];
+            var camera = matchMode.Equals("Exact", comparison)
+                ? cameras.FirstOrDefault(x => string.Equals(x.Name, targetName, comparison))
+                : cameras.FirstOrDefault(x => x.Name.IndexOf(targetName, comparison) >= 0);
+
+            if (camera != null)
+                return camera;
+
+            var foundCameras = string.Join(Environment.NewLine, cameras.Select(x => "- " + x.Name));
+
+            SetStatus("Target camera not found: " + targetName);
+
+            MessageBox.Show(
+                this,
+                "The target camera was not found:" +
+                Environment.NewLine +
+                targetName +
+                Environment.NewLine +
+                Environment.NewLine +
+                "Found cameras:" +
+                Environment.NewLine +
+                foundCameras,
+                "Camera Not Found",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+
+            return null;
+        }
+
+        private static string GetSetting(string key, string fallback = "")
+        {
+            var value = ConfigurationManager.AppSettings[key];
+
+            if (string.IsNullOrWhiteSpace(value))
+                return fallback;
+
+            return value.Trim();
         }
 
         private void StopCamera(string status)
         {
             CleanupCamera();
+
             SetStatus(status);
+
             _startButton.Enabled = true;
             _stopButton.Enabled = false;
         }
 
         private void CleanupCamera()
         {
-            if (_camera != null)
-            {
-                _camera.Dispose();
-                _camera = null;
-            }
+            if (_camera == null)
+                return;
+
+            _camera.Dispose();
+            _camera = null;
         }
 
         private void SetStatus(string text)
