@@ -1,15 +1,15 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-[assembly: AssemblyTitle("UsbCameraOrangeDeutsch")]
-[assembly: AssemblyDescription("Orangefarbene deutsche USB-Kamera-Vorschau für Windows")]
+[assembly: AssemblyTitle("GabelstaplerKameraMonitor")]
+[assembly: AssemblyDescription("Orangefarbener Kamera-Monitor fuer Gabelstapler")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("UsbCameraOrangeDeutsch")]
+[assembly: AssemblyProduct("GabelstaplerKameraMonitor")]
 [assembly: AssemblyCopyright("Copyright © 2026")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
-[assembly: Guid("2E4EAE1F-FE41-45F2-B98E-A459F3C8F04F")]
+[assembly: Guid("7D733AF8-8F7B-4B12-80F6-57E568991AF4")]
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]

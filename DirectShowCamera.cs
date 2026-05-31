@@ -4,7 +4,7 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 
-namespace UsbCameraOrangeDeutsch
+namespace GabelstaplerKameraMonitor
 {
     public sealed class DirectShowCamera : IDisposable
     {
