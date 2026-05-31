@@ -1,43 +1,47 @@
-# Gabelstapler Kamera-Monitor
+# Gabelstapler Camera Monitor
 
-Windows-Forms-Anwendung fuer eine USB- oder Webkamera am Gabelstapler.
+A simple Windows desktop application for showing a live USB camera feed from a forklift.
 
-## Funktionen
+This project was built for a practical use case: a webcam is mounted near the forklift fork, so the driver can see the fork position more clearly while working. The interface is designed in German and uses an orange industrial-style theme to match the forklift environment.
 
-- Deutsche Bedienoberflaeche
-- Orange/schwarzes Stapler-Design
-- Livebild der Gabelkamera
-- Rote horizontale Gabelspitzen-Linie im Kamerabild
-- Linie per Mausrad im Bild nach oben oder unten verschiebbar
-- Zusatzbuttons fuer Linie hoch/runter
-- Aufnahmefunktion als AVI-Datei
-- Kamera kann ueber App.config festgelegt werden
+## What it does
 
-## Bedienung
+The application opens a USB camera or webcam and shows the live video inside a Windows Forms interface.
 
-- Start: Kamera starten
-- Stop: Kamera stoppen
-- Aktualisieren: Kamera neu laden
-- Aufnahme starten: Livebild inklusive roter Linie aufnehmen
-- Aufnahme stoppen: AVI-Datei speichern
-- Mausrad im Kamerabild: rote Gabelspitzen-Linie verschieben
+It also adds a red horizontal guide line over the camera image. This line can be moved up and down by the user and is meant to mark the approximate fork tip position.
 
-## Einstellungen
+The driver can use this line as a visual reference while positioning the forks.
 
-Die Einstellungen liegen in App.config.
+## Main features
 
-- TargetCameraName: Name der gewuenschten Kamera
-- CameraMatchMode: Contains oder Exact
-- RecordingFolder: Ordner fuer Aufnahmen
-- RecordingFps: Bilder pro Sekunde fuer die Aufnahme
-- RecordingQuality: JPEG-Qualitaet fuer AVI-Aufnahme
-- InitialForkLinePercent: Startposition der roten Linie in Prozent
-- ForkLineStepPixels: Schrittweite beim Verschieben der Linie
+- Live USB camera preview
+- German user interface
+- Orange and black forklift-style design
+- Red adjustable fork-tip guide line
+- Mouse wheel support for moving the guide line
+- Buttons for moving the guide line up and down
+- Start, stop, and refresh camera controls
+- Optional video recording
+- Camera locking through `App.config`
+- Simple Windows Forms project structure
 
-Wenn TargetCameraName leer ist, wird die erste gefundene Kamera verwendet.
+## Use case
 
-## Build
+This software is intended for forklifts where a camera is mounted near the fork area.
 
-build.bat starten oder die Solution in Visual Studio oeffnen.
+The driver can see the fork position on a screen and use the red guide line as a reference point for the fork tip. This can make positioning easier, especially when visibility is limited.
 
-Zielplattform: .NET Framework 4.8
+## Requirements
+
+- Windows
+- Visual Studio
+- .NET Framework 4.8
+- A USB camera or webcam
+- A connected display inside or near the forklift cabin
+
+## How to build
+
+Open the solution file in Visual Studio:
+
+```text
+GabelstaplerKameraMonitor.sln
